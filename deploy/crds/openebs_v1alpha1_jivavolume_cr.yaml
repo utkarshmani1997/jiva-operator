@@ -1,0 +1,12 @@
+apiVersion: openebs.io/v1alpha1
+kind: JivaVolume
+metadata:
+  name: example-jivavolume
+  namespace: default
+  labels:
+    "openebs.io/component": "jiva-operator"
+spec:
+  capacity: 1073741824
+  replicationFactor: "2"
+  pvc: "demo-jiva-pvc"
+
