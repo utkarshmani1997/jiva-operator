@@ -12,7 +12,9 @@ import (
 type JivaVolumeSpec struct {
 	// Capacity represents the actual resources of the underlying
 	// jiva volume.
-	PVC      string `json:"pvc,omitempty"`
+	SC       string `json:"sc"`
+	PV       string `json:"pv"`
+	PVC      string `json:"pvc"`
 	Capacity int64  `json:"capacity"`
 	// ReplicationFactor represents the actual replica count for the underlying
 	// jiva volume
@@ -66,7 +68,7 @@ type ReplicaStatus struct {
 type JivaVolumePhase string
 
 const (
-	// JivaVolumePhasePending indicates that the jvc is still waiting for
+	// JivaVolumePhasePending indicates that the jivavolume is still waiting for
 	// the jivavolume to be created and bound
 	JivaVolumePhasePending JivaVolumePhase = "Pending"
 
@@ -81,6 +83,9 @@ const (
 	// JivaVolumePhaseCreated indicates that the jivavolume provisioning
 	// has Created
 	JivaVolumePhaseCreated JivaVolumePhase = "Created"
+
+	// JivaVolumePhaseDeleting indicates the the jivavolume is deprovisioned
+	JivaVolumePhaseDeleting JivaVolumePhase = "Deleting"
 )
 
 func init() {

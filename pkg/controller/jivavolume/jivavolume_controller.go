@@ -33,7 +33,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-var log = logf.Log.WithName("controller_jivavolume")
+var (
+	log           = logf.Log.WithName("controller_jivavolume")
+	svcNameFormat = "%s-jiva-ctrl-svc.%s.svc.cluster.local"
+)
 
 /**
 * USER ACTION REQUIRED: This is a scaffold file intended for the user to modify with their own Controller
@@ -116,63 +119,57 @@ func (r *ReconcileJivaVolume) Reconcile(request reconcile.Request) (reconcile.Re
 
 	switch instance.Status.Phase {
 	case jv.JivaVolumePhaseCreated, jv.JivaVolumePhaseSyncing:
-		return reconcile.Result{}, getVolumeStatus(instance.Spec.TargetIP + fmt.Sprint(instance.Spec.TargetPort))
-	case jv.JivaVolumePhaseFailed:
-		return reconcile.Result{}, teardownJivaComponents(instance)
-	case jv.JivaVolumePhasePending:
-		reqLogger.Info("JivaVolume is in pending state, start bootstraping jiva components")
-		return reconcile.Result{}, r.bootstrapJiva(instance, reqLogger)
-	default:
-		reqLogger.Info("JivaVolume is in pending state, start bootstraping jiva components")
+		return reconcile.Result{}, getAndUpdateVolumeStatus(instance.Spec.TargetIP + fmt.Sprint(instance.Spec.TargetPort))
+	case jv.JivaVolumePhaseDeleting:
+		reqLogger.Info("start tearing down jiva components", "JivaVolume: ", instance)
+		return reconcile.Result{}, r.teardownJivaComponents(instance, reqLogger)
+	case jv.JivaVolumePhasePending, jv.JivaVolumePhaseFailed:
+		reqLogger.Info("start bootstraping jiva components", "JivaVolume: ", instance)
 		return reconcile.Result{}, r.bootstrapJiva(instance, reqLogger)
 	}
 
-	return reconcile.Result{}, nil
+	reqLogger.Info("start bootstraping jiva components")
+
+	return reconcile.Result{}, r.bootstrapJiva(instance, reqLogger)
 }
 
 // 1. Create controller svc
 // 2. Create controller deploy
 // 3. Create replica statefulset
-func (r *ReconcileJivaVolume) bootstrapJiva(cr *jv.JivaVolume, reqLog logr.Logger) error {
-	if err := r.createControllerService(cr, reqLog); err != nil {
+func (r *ReconcileJivaVolume) bootstrapJiva(cr *jv.JivaVolume, reqLog logr.Logger) (err error) {
+	defer func() {
+		if err != nil {
+			if err := r.updateJivaVolumeWithPhase(cr, jv.JivaVolumePhaseFailed); err != nil {
+				reqLog.Info("failed to update JivaVolume phase", "JivaVolume CR: ", cr)
+			}
+		} else {
+			if err := r.updateJivaVolumeWithPhase(cr, jv.JivaVolumePhaseSyncing); err != nil {
+				reqLog.Info("failed to update JivaVolume phase", "JivaVolume CR: ", cr)
+			}
+		}
+	}()
+
+	err = r.createControllerService(cr, reqLog)
+	if err != nil {
 		return err
 	}
 
-	if err := r.updateJivaVolume(cr); err != nil {
+	err = r.updateJivaVolumeWithServiceIP(cr, jv.JivaVolumePhasePending)
+	if err != nil {
 		return err
 	}
 
-	if err := r.createControllerDeployment(cr, reqLog); err != nil {
+	err = r.createControllerDeployment(cr, reqLog)
+	if err != nil {
 		return err
 	}
 
-	if err := r.createReplicaStatefulSet(cr, reqLog); err != nil {
+	err = r.createReplicaStatefulSet(cr, reqLog)
+	if err != nil {
 		return err
 	}
+
 	return nil
-}
-
-// newPodForCR returns a busybox pod with the same name/namespace as the cr
-func newPodForCR(cr *jv.JivaVolume) *corev1.Pod {
-	labels := map[string]string{
-		"app": cr.Name,
-	}
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cr.Name + "-pod",
-			Namespace: cr.Namespace,
-			Labels:    labels,
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:    "busybox",
-					Image:   "busybox",
-					Command: []string{"sleep", "3600"},
-				},
-			},
-		},
-	}
 }
 
 // TODO: Add code to configure resource limits, nodeAffinity etc.
@@ -181,7 +178,8 @@ func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 	labels := map[string]string{
 		"openebs.io/cas-type":                "jiva",
 		"openebs.io/controller":              "jiva-controller",
-		"openebs.io/persistent-volume":       cr.Name,
+		"openebs.io/jiva-volume":             cr.Name,
+		"openebs.io/persistent-volume":       cr.Spec.PV,
 		"openebs.io/persistent-volume-claim": cr.Spec.PVC,
 	}
 
@@ -192,7 +190,8 @@ func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 		WithReplicas(&reps).
 		WithStrategyType(appsv1.RecreateDeploymentStrategyType).
 		WithSelectorMatchLabelsNew(map[string]string{
-			"openebs.io/persistent-volume":       cr.Name,
+			"openebs.io/jiva-volume":             cr.Name,
+			"openebs.io/persistent-volume":       cr.Spec.PV,
 			"openebs.io/persistent-volume-claim": cr.Spec.PVC,
 		}).
 		WithPodTemplateSpecBuilder(
@@ -226,7 +225,7 @@ func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 							"--frontend",
 							"gotgt",
 							"--clusterIP",
-							cr.Name + "-ctrl-svc." + cr.Namespace + ".svc.cluster.local",
+							fmt.Sprintf(svcNameFormat, cr.Name, cr.Namespace),
 							cr.Name,
 						}).
 						WithEnvsNew([]corev1.EnvVar{
@@ -297,7 +296,8 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 	labels := map[string]string{
 		"openebs.io/cas-type":                "jiva",
 		"openebs.io/replica":                 "jiva-replica",
-		"openebs.io/persistent-volume":       cr.Name,
+		"openebs.io/jiva-volume":             cr.Name,
+		"openebs.io/persistent-volume":       cr.Spec.PV,
 		"openebs.io/persistent-volume-claim": cr.Spec.PVC,
 	}
 	rc, err := strconv.ParseInt(cr.Spec.ReplicationFactor, 10, 32)
@@ -311,7 +311,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 	prev := true
 
 	stsObj, err = sts.NewBuilder().
-		WithName(cr.Name + "rep").
+		WithName(cr.Name + "-jiva-rep").
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithServiceName("jiva-replica-svc").
@@ -321,7 +321,8 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 		WithStrategyType(appsv1.RollingUpdateStatefulSetStrategyType).
 		WithReplicas(&replicaCount).
 		WithSelectorMatchLabels(map[string]string{
-			"openebs.io/persistent-volume":       cr.Name,
+			"openebs.io/jiva-volume":             cr.Name,
+			"openebs.io/persistent-volume":       cr.Spec.PV,
 			"openebs.io/persistent-volume-claim": cr.Spec.PVC,
 			"openebs.io/replica":                 "jiva-replica",
 		}).
@@ -337,8 +338,10 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 							{
 								LabelSelector: &metav1.LabelSelector{
 									MatchLabels: map[string]string{
-										"openebs.io/replica":           "jiva-replica",
-										"openebs.io/persistent-volume": cr.Name,
+										"openebs.io/replica":                 "jiva-replica",
+										"openebs.io/persistent-volume":       cr.Spec.PV,
+										"openebs.io/persistent-volume-claim": cr.Spec.PVC,
+										"openebs.io/jiva-volume":             cr.Name,
 									},
 								},
 								TopologyKey: "kubernetes.io/hostname",
@@ -371,7 +374,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 						WithArgumentsNew([]string{
 							"replica",
 							"--frontendIP",
-							cr.Name + "-ctrl-svc." + cr.Namespace + ".svc.cluster.local",
+							fmt.Sprintf(svcNameFormat, cr.Name, cr.Namespace),
 							"--size",
 							strconv.FormatInt(cr.Spec.Capacity, 10),
 							"openebs",
@@ -390,7 +393,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 			pvc.NewBuilder().
 				WithName("openebs").
 				WithNamespace(cr.Namespace).
-				WithStorageClass("openebs-hostpath").
+				WithStorageClass(cr.Spec.SC).
 				WithAccessModes([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}).
 				WithCapacity(strconv.FormatInt(cr.Spec.Capacity, 10)),
 		).Build()
@@ -417,17 +420,25 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 	return nil
 }
 
-func (r *ReconcileJivaVolume) updateJivaVolume(cr *jv.JivaVolume) error {
+func (r *ReconcileJivaVolume) updateJivaVolumeWithServiceIP(cr *jv.JivaVolume, phase jv.JivaVolumePhase) error {
 	ctrlSVC := &v1.Service{}
 	if err := r.client.Get(context.TODO(),
 		types.NamespacedName{
-			Name:      cr.Name + "-ctrl-svc",
+			Name:      cr.Name + "-jiva-ctrl-svc",
 			Namespace: cr.Namespace,
 		}, ctrlSVC); err != nil {
 		return operr.Wrapf(err, "failed to get service: {%v}", cr.Name+"-ctrl-svc")
 	}
 	cr.Spec.TargetIP = ctrlSVC.Spec.ClusterIP
-	cr.Status.Phase = jv.JivaVolumePhaseCreated
+	cr.Status.Phase = phase
+	if err := r.client.Update(context.TODO(), cr); err != nil {
+		return operr.Wrapf(err, "failed to update JivaVolume CR: {%v} with targetIP", cr)
+	}
+	return nil
+}
+
+func (r *ReconcileJivaVolume) updateJivaVolumeWithPhase(cr *jv.JivaVolume, phase jv.JivaVolumePhase) error {
+	cr.Status.Phase = phase
 	if err := r.client.Update(context.TODO(), cr); err != nil {
 		return operr.Wrapf(err, "failed to update JivaVolume CR: {%v} with targetIP", cr)
 	}
@@ -445,7 +456,7 @@ func (r *ReconcileJivaVolume) createControllerService(cr *jv.JivaVolume,
 	}
 
 	svcObj, err := svc.NewBuilder().
-		WithName(cr.Name + "-ctrl-svc").
+		WithName(cr.Name + "-jiva-ctrl-svc").
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithSelectorsNew(map[string]string{
@@ -494,10 +505,47 @@ func (r *ReconcileJivaVolume) createControllerService(cr *jv.JivaVolume,
 	return nil
 }
 
-func teardownJivaComponents(cr *jv.JivaVolume) error {
+func deleteResource(name, ns string, r *ReconcileJivaVolume, obj runtime.Object) error {
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: ns}, obj)
+	if err != nil && errors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return operr.Wrapf(err, "failed to get the resource details: %v", name)
+	}
+
+	err = r.client.Delete(context.TODO(), obj)
+	if err != nil {
+		return operr.Wrapf(err, "failed to delete the resource: %v", name)
+	}
+
 	return nil
 }
 
-func getVolumeStatus(addr string) error {
+func (r *ReconcileJivaVolume) deleteJivaVolume(cr *jv.JivaVolume) error {
+	return deleteResource(cr.Name, cr.Namespace, r, &jv.JivaVolume{})
+}
+
+func (r *ReconcileJivaVolume) teardownJivaComponents(cr *jv.JivaVolume, reqLog logr.Logger) (err error) {
+	objects := map[string]runtime.Object{
+		cr.Name + "-jiva-ctrl-svc": &v1.Service{},
+		cr.Name + "-jiva-ctrl":     &appsv1.Deployment{},
+		cr.Name + "-jiva-rep":      &appsv1.StatefulSet{},
+	}
+
+	for name, obj := range objects {
+		err = deleteResource(name, cr.Namespace, r, obj)
+		if err != nil {
+			return err
+		}
+	}
+	err = r.deleteJivaVolume(cr)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getAndUpdateVolumeStatus(addr string) error {
 	return nil
 }
