@@ -311,12 +311,12 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 	prev := true
 
 	stsObj, err = sts.NewBuilder().
-		WithName(cr.Name + "-jiva-rep").
+		WithName(cr.Spec.PV + "-jiva-rep").
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithServiceName("jiva-replica-svc").
 		WithAnnotationsNew(map[string]string{
-			"openebs.io/capacity": strconv.FormatInt(cr.Spec.Capacity, 10),
+			"openebs.io/capacity": cr.Spec.Capacity,
 		}).
 		WithStrategyType(appsv1.RollingUpdateStatefulSetStrategyType).
 		WithReplicas(&replicaCount).
@@ -330,7 +330,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 			pts.NewBuilder().
 				WithLabels(labels).
 				WithAnnotations(map[string]string{
-					"openebs.io/capacity": strconv.FormatInt(cr.Spec.Capacity, 10),
+					"openebs.io/capacity": cr.Spec.Capacity,
 				}).
 				WithAffinity(&corev1.Affinity{
 					PodAntiAffinity: &corev1.PodAntiAffinity{
@@ -374,9 +374,9 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 						WithArgumentsNew([]string{
 							"replica",
 							"--frontendIP",
-							fmt.Sprintf(svcNameFormat, cr.Name, cr.Namespace),
+							fmt.Sprintf(svcNameFormat, cr.Spec.PV, cr.Namespace),
 							"--size",
-							strconv.FormatInt(cr.Spec.Capacity, 10),
+							cr.Spec.Capacity,
 							"openebs",
 						}).
 						WithImagePullPolicy(corev1.PullIfNotPresent).
@@ -395,7 +395,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 				WithNamespace(cr.Namespace).
 				WithStorageClass(cr.Spec.SC).
 				WithAccessModes([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}).
-				WithCapacity(strconv.FormatInt(cr.Spec.Capacity, 10)),
+				WithCapacity(cr.Spec.Capacity),
 		).Build()
 
 	if err != nil {
@@ -424,7 +424,7 @@ func (r *ReconcileJivaVolume) updateJivaVolumeWithServiceIP(cr *jv.JivaVolume, p
 	ctrlSVC := &v1.Service{}
 	if err := r.client.Get(context.TODO(),
 		types.NamespacedName{
-			Name:      cr.Name + "-jiva-ctrl-svc",
+			Name:      cr.Spec.PV + "-jiva-ctrl-svc",
 			Namespace: cr.Namespace,
 		}, ctrlSVC); err != nil {
 		return operr.Wrapf(err, "failed to get service: {%v}", cr.Name+"-ctrl-svc")
@@ -451,17 +451,19 @@ func (r *ReconcileJivaVolume) createControllerService(cr *jv.JivaVolume,
 		"openebs.io/cas-type":                "jiva",
 		"openebs.io/controller":              "jiva-controller",
 		"openebs.io/controller-service":      "jiva-controller-service",
-		"openebs.io/persistent-volume":       cr.Name,
+		"openebs.io/jiva-volume":             cr.Name,
+		"openebs.io/persistent-volume":       cr.Spec.PV,
 		"openebs.io/persistent-volume-claim": cr.Spec.PVC,
 	}
 
 	svcObj, err := svc.NewBuilder().
-		WithName(cr.Name + "-jiva-ctrl-svc").
+		WithName(cr.Spec.PV + "-jiva-ctrl-svc").
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithSelectorsNew(map[string]string{
+			"openebs.io/jiva-volume":       cr.Name,
 			"openebs.io/controller":        "jiva-controller",
-			"openebs.io/persistent-volume": cr.Name,
+			"openebs.io/persistent-volume": cr.Spec.PV,
 		}).
 		WithPorts([]corev1.ServicePort{
 			{
@@ -527,9 +529,9 @@ func (r *ReconcileJivaVolume) deleteJivaVolume(cr *jv.JivaVolume) error {
 
 func (r *ReconcileJivaVolume) teardownJivaComponents(cr *jv.JivaVolume, reqLog logr.Logger) (err error) {
 	objects := map[string]runtime.Object{
-		cr.Name + "-jiva-ctrl-svc": &v1.Service{},
-		cr.Name + "-jiva-ctrl":     &appsv1.Deployment{},
-		cr.Name + "-jiva-rep":      &appsv1.StatefulSet{},
+		cr.Spec.PV + "-jiva-ctrl-svc": &v1.Service{},
+		cr.Spec.PV + "-jiva-ctrl":     &appsv1.Deployment{},
+		cr.Spec.PV + "-jiva-rep":      &appsv1.StatefulSet{},
 	}
 
 	for name, obj := range objects {

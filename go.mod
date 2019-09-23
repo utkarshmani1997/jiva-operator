@@ -2,11 +2,17 @@ module github.com/utkarshmani1997/jiva-operator
 
 require (
 	github.com/NYTimes/gziphandler v1.0.1 // indirect
+	github.com/container-storage-interface/spec v1.1.0
 	github.com/go-logr/logr v0.1.0
 	github.com/go-openapi/spec v0.19.0
+	github.com/kubernetes-csi/csi-lib-utils v0.6.1
 	github.com/operator-framework/operator-sdk v0.10.1-0.20190910171846-947a464dbe96
 	github.com/pkg/errors v0.8.1
+	github.com/sirupsen/logrus v1.4.1
+	github.com/spf13/cobra v0.0.3
 	github.com/spf13/pflag v1.0.3
+	golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3
+	google.golang.org/grpc v1.19.1
 	k8s.io/api v0.0.0-20190612125737-db0771252981
 	k8s.io/apimachinery v0.0.0-20190612125636-6a5db36e93ad
 	k8s.io/client-go v11.0.0+incompatible

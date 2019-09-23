@@ -15,7 +15,7 @@ type JivaVolumeSpec struct {
 	SC       string `json:"sc"`
 	PV       string `json:"pv"`
 	PVC      string `json:"pvc"`
-	Capacity int64  `json:"capacity"`
+	Capacity string `json:"capacity"`
 	// ReplicationFactor represents the actual replica count for the underlying
 	// jiva volume
 	ReplicationFactor string `json:"replicationFactor"`
