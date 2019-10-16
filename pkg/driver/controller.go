@@ -21,7 +21,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/sirupsen/logrus"
-	errors "github.com/utkarshmani1997/jiva-operator/pkg/errors/v1alpha1"
+	"github.com/utkarshmani1997/jiva-operator/pkg/kubernetes/client"
 	csipayload "github.com/utkarshmani1997/jiva-operator/pkg/response"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
@@ -31,17 +31,8 @@ import (
 // controller is the server implementation
 // for CSI Controller
 type controller struct {
-	driver       *CSIDriver
+	client       *client.Client
 	capabilities []*csi.ControllerServiceCapability
-}
-
-// NewController returns a new instance
-// of CSI controller
-func NewController(d *CSIDriver) csi.ControllerServer {
-	return &controller{
-		driver:       d,
-		capabilities: newControllerCapabilities(),
-	}
 }
 
 // SupportedVolumeCapabilityAccessModes contains the list of supported access
@@ -52,6 +43,15 @@ var SupportedVolumeCapabilityAccessModes = []*csi.VolumeCapability_AccessMode{
 	},
 }
 
+// NewController returns a new instance
+// of CSI controller
+func NewController(cli *client.Client) csi.ControllerServer {
+	return &controller{
+		client:       cli,
+		capabilities: newControllerCapabilities(),
+	}
+}
+
 // CreateVolume provisions a volume
 func (cs *controller) CreateVolume(
 	ctx context.Context,
@@ -59,16 +59,32 @@ func (cs *controller) CreateVolume(
 ) (*csi.CreateVolumeResponse, error) {
 
 	logrus.Infof("received request to create volume {%s} vol{%v}", req.GetName(), req)
-	var err error
 
-	if err = cs.validateVolumeCreateReq(req); err != nil {
-		return nil, err
+	// set client each time to avoid caching issue
+	if err := cs.client.Set(); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+
 	}
 
-	// TODO: Create JivaVolume
+	if err := cs.validateVolumeCreateReq(req); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+
+	}
+
+	instance, err := cs.client.GetJivaVolume(req.GetName())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	} else if instance != nil {
+		return nil, status.Error(codes.AlreadyExists, fmt.Errorf("JivaVolume CR already created: %v", instance).Error())
+	}
+
+	if err := cs.client.CreateJivaVolume(req); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
 	return csipayload.NewCreateVolumeResponseBuilder().
-		WithName("TODO").
-		WithCapacity(12345).
+		WithName(instance.Name).
+		WithCapacity(req.GetCapacityRange().GetRequiredBytes()).
 		Build(), nil
 }
 
@@ -79,16 +95,7 @@ func (cs *controller) DeleteVolume(
 
 	logrus.Infof("received request to delete volume {%s}", req.VolumeId)
 
-	var (
-		err error
-	)
-
-	if err = cs.validateDeleteVolumeReq(req); err != nil {
-		return nil, err
-	}
-
 	// TODO: Add status to delete JivaVolume CR.
-
 	return csipayload.NewDeleteVolumeResponseBuilder().Build(), nil
 }
 
@@ -186,6 +193,26 @@ func (cs *controller) ControllerPublishVolume(
 	req *csi.ControllerPublishVolumeRequest,
 ) (*csi.ControllerPublishVolumeResponse, error) {
 
+	volumeID := req.GetVolumeId()
+	if len(volumeID) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume ID not provided")
+	}
+
+	nodeID := req.GetNodeId()
+	if len(nodeID) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Node ID not provided")
+	}
+
+	volCap := req.GetVolumeCapability()
+	if volCap == nil {
+		return nil, status.Error(codes.InvalidArgument, "Volume capability not provided")
+	}
+
+	caps := []*csi.VolumeCapability{volCap}
+	if !isValidVolumeCapabilities(caps) {
+		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
+	}
+
 	return nil, status.Error(codes.Unimplemented, "")
 }
 
@@ -224,28 +251,6 @@ func validateCapabilities(caps []*csi.VolumeCapability) bool {
 	return true
 }
 
-func (cs *controller) validateDeleteVolumeReq(req *csi.DeleteVolumeRequest) error {
-	volumeID := req.GetVolumeId()
-	if volumeID == "" {
-		return status.Error(
-			codes.InvalidArgument,
-			"failed to handle delete volume request: missing volume id",
-		)
-	}
-
-	err := cs.validateRequest(
-		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
-	)
-	if err != nil {
-		return errors.Wrapf(
-			err,
-			"failed to handle delete volume request for {%s} : validation failed",
-			volumeID,
-		)
-	}
-	return nil
-}
-
 // IsSupportedVolumeCapabilityAccessMode valides the requested access mode
 func IsSupportedVolumeCapabilityAccessMode(
 	accessMode csi.VolumeCapability_AccessMode_Mode,
@@ -276,6 +281,7 @@ func newControllerCapabilities() []*csi.ControllerServiceCapability {
 
 	var capabilities []*csi.ControllerServiceCapability
 	for _, cap := range []csi.ControllerServiceCapability_RPC_Type{
+		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
 		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
 	} {
 		capabilities = append(capabilities, fromType(cap))
@@ -283,40 +289,30 @@ func newControllerCapabilities() []*csi.ControllerServiceCapability {
 	return capabilities
 }
 
-// validateRequest validates if the requested service is
-// supported by the driver
-func (cs *controller) validateRequest(
-	c csi.ControllerServiceCapability_RPC_Type,
-) error {
-
-	for _, cap := range cs.capabilities {
-		if c == cap.GetRpc().GetType() {
-			return nil
+func isValidVolumeCapabilities(volCaps []*csi.VolumeCapability) bool {
+	hasSupport := func(cap *csi.VolumeCapability) bool {
+		for _, c := range SupportedVolumeCapabilityAccessModes {
+			if c.GetMode() == cap.AccessMode.GetMode() {
+				return true
+			}
 		}
+		return false
 	}
 
-	return status.Error(
-		codes.InvalidArgument,
-		fmt.Sprintf("failed to validate request: {%s} is not supported", c),
-	)
+	foundAll := true
+	for _, c := range volCaps {
+		if !hasSupport(c) {
+			foundAll = false
+		}
+	}
+	return foundAll
 }
 
 func (cs *controller) validateVolumeCreateReq(req *csi.CreateVolumeRequest) error {
-	err := cs.validateRequest(
-		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
-	)
-	if err != nil {
-		return errors.Wrapf(
-			err,
-			"failed to handle create volume request for {%s}",
-			req.GetName(),
-		)
-	}
-
 	if req.GetName() == "" {
 		return status.Error(
 			codes.InvalidArgument,
-			"failed to handle create volume request: missing volume name",
+			"failed to validate volume create request: missing volume name",
 		)
 	}
 
@@ -324,8 +320,15 @@ func (cs *controller) validateVolumeCreateReq(req *csi.CreateVolumeRequest) erro
 	if volCapabilities == nil {
 		return status.Error(
 			codes.InvalidArgument,
-			"failed to handle create volume request: missing volume capabilities",
+			"failed to get volume capabilities: missing volume capabilities",
 		)
 	}
+
+	if !isValidVolumeCapabilities(volCapabilities) {
+		return status.Error(
+			codes.InvalidArgument,
+			"failed to validate volume capabilities")
+	}
+
 	return nil
 }

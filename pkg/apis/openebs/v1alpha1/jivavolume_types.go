@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -10,12 +11,13 @@ import (
 // JivaVolumeSpec defines the desired state of JivaVolume
 // +k8s:openapi-gen=true
 type JivaVolumeSpec struct {
-	// Capacity represents the actual resources of the underlying
-	// jiva volume.
-	SC       string `json:"sc"`
-	PV       string `json:"pv"`
-	PVC      string `json:"pvc"`
-	Capacity string `json:"capacity"`
+	// ReplicaSC represents the storage class used for
+	// creating the pvc for the replicas (provisioned by localpv provisioner)
+	ReplicaSC       string                  `json:"replicaSC"`
+	PV              string                  `json:"pv"`
+	Capacity        int64                   `json:"capacity"`
+	ReplicaResource v1.ResourceRequirements `json:"replicaResource"`
+	TargetResource  v1.ResourceRequirements `json:"targetResource"`
 	// ReplicationFactor represents the actual replica count for the underlying
 	// jiva volume
 	ReplicationFactor string `json:"replicationFactor"`
@@ -23,12 +25,15 @@ type JivaVolumeSpec struct {
 	TargetPort        int32  `json:"targetPort"`
 	Iqn               string `json:"iqn"`
 	TargetPortal      string `json:"targetPortal"`
+	MountPath         string `json:"mountPath"`
+	FSType            string `json:"fsType"`
+	ISCSIInterface    string `json:"iscsiInterface"`
+	DevicePath        string `json:"devicePath"`
 }
 
 // JivaVolumeStatus defines the observed state of JivaVolume
 // +k8s:openapi-gen=true
 type JivaVolumeStatus struct {
-	Name            string          `json:"name"`
 	Status          string          `json:"status"`
 	ReplicaCount    int             `json:"replicaCount"`
 	ReplicaStatuses []ReplicaStatus `json:"replicaStatus"`

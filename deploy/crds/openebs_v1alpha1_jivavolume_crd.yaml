@@ -10,8 +10,9 @@ spec:
     plural: jivavolumes
     singular: jivavolume
   scope: Namespaced
-  subresources:
-    status: {}
+  # commenting out so that we can set the status while creating CR
+  #subresources:
+  #  status: {}
   validation:
     openAPIV3Schema:
       properties:

@@ -70,7 +70,7 @@ container-operator: build-operator
 	docker build -f Dockerfile -t $(REGISTRY)/$(OPERATOR_NAME):$(OPERATOR_TAG) .
 
 generate:
-	operator-sdk generate k8s --verbose
+	GO111MODULE=on operator-sdk generate k8s --verbose
 
 operator:
 	operator-sdk build $(REGISTRY)/$(OPERATOR_NAME):$(OPERATOR_TAG) --verbose

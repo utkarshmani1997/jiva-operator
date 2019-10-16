@@ -20,6 +20,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/sirupsen/logrus"
 	config "github.com/utkarshmani1997/jiva-operator/pkg/config"
+	"github.com/utkarshmani1997/jiva-operator/pkg/kubernetes/client"
 )
 
 // volume can only be published once as
@@ -64,7 +65,7 @@ func newVolumeCapabilityAccessMode(mode csi.VolumeCapability_AccessMode_Mode) *c
 }
 
 // New returns a new driver instance
-func New(config *config.Config) *CSIDriver {
+func New(config *config.Config, cli *client.Client) *CSIDriver {
 	driver := &CSIDriver{
 		config: config,
 		cap:    GetVolumeCapabilityAccessModes(),
@@ -72,10 +73,10 @@ func New(config *config.Config) *CSIDriver {
 
 	switch config.PluginType {
 	case "controller":
-		driver.cs = NewController(driver)
+		driver.cs = NewController(cli)
 
 	case "agent":
-		driver.ns = NewNode(driver)
+		driver.ns = NewNode(driver, cli)
 	}
 
 	// Identity server is common to both node and

@@ -10,7 +10,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/utkarshmani1997/jiva-operator/pkg/config"
 	"github.com/utkarshmani1997/jiva-operator/pkg/driver"
+	"github.com/utkarshmani1997/jiva-operator/pkg/kubernetes/client"
 	"github.com/utkarshmani1997/jiva-operator/pkg/version"
+	k8scfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 /*
@@ -77,7 +79,23 @@ func run(config *config.Config) {
 		config.NodeID,
 	)
 
-	err := driver.New(config).Run()
+	// get the kube config
+	cfg, err := k8scfg.GetConfig()
+	if err != nil {
+		logrus.Fatalf("error getting config: %v", err)
+	}
+
+	// generate a new client object
+	cli, err := client.New(cfg)
+	if err != nil {
+		logrus.Fatalf("error creating client from config: %v", err)
+	}
+
+	if err := cli.RegisterAPI(); err != nil {
+		logrus.Fatalf("error registering API: %v", err)
+	}
+
+	err = driver.New(config, cli).Run()
 	if err != nil {
 		log.Fatalln(err)
 	}

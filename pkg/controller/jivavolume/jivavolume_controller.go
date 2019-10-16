@@ -119,7 +119,7 @@ func (r *ReconcileJivaVolume) Reconcile(request reconcile.Request) (reconcile.Re
 
 	switch instance.Status.Phase {
 	case jv.JivaVolumePhaseCreated, jv.JivaVolumePhaseSyncing:
-		return reconcile.Result{}, getAndUpdateVolumeStatus(instance.Spec.TargetIP + fmt.Sprint(instance.Spec.TargetPort))
+		return reconcile.Result{}, getAndUpdateVolumeStatus(instance)
 	case jv.JivaVolumePhaseDeleting:
 		reqLogger.Info("start tearing down jiva components", "JivaVolume: ", instance)
 		return reconcile.Result{}, r.teardownJivaComponents(instance, reqLogger)
@@ -176,11 +176,9 @@ func (r *ReconcileJivaVolume) bootstrapJiva(cr *jv.JivaVolume, reqLog logr.Logge
 func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 	reqLog logr.Logger) error {
 	labels := map[string]string{
-		"openebs.io/cas-type":                "jiva",
-		"openebs.io/controller":              "jiva-controller",
-		"openebs.io/jiva-volume":             cr.Name,
-		"openebs.io/persistent-volume":       cr.Spec.PV,
-		"openebs.io/persistent-volume-claim": cr.Spec.PVC,
+		"openebs.io/cas-type":          "jiva",
+		"openebs.io/component":         "jiva-controller",
+		"openebs.io/persistent-volume": cr.Spec.PV,
 	}
 
 	reps := int32(1)
@@ -190,9 +188,7 @@ func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 		WithReplicas(&reps).
 		WithStrategyType(appsv1.RecreateDeploymentStrategyType).
 		WithSelectorMatchLabelsNew(map[string]string{
-			"openebs.io/jiva-volume":             cr.Name,
-			"openebs.io/persistent-volume":       cr.Spec.PV,
-			"openebs.io/persistent-volume-claim": cr.Spec.PVC,
+			"openebs.io/persistent-volume": cr.Spec.PV,
 		}).
 		WithPodTemplateSpecBuilder(
 			pts.NewBuilder().
@@ -294,11 +290,9 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 		stsObj       *appsv1.StatefulSet
 	)
 	labels := map[string]string{
-		"openebs.io/cas-type":                "jiva",
-		"openebs.io/replica":                 "jiva-replica",
-		"openebs.io/jiva-volume":             cr.Name,
-		"openebs.io/persistent-volume":       cr.Spec.PV,
-		"openebs.io/persistent-volume-claim": cr.Spec.PVC,
+		"openebs.io/cas-type":          "jiva",
+		"openebs.io/component":         "jiva-replica",
+		"openebs.io/persistent-volume": cr.Spec.PV,
 	}
 	rc, err := strconv.ParseInt(cr.Spec.ReplicationFactor, 10, 32)
 	if err != nil {
@@ -315,33 +309,23 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithServiceName("jiva-replica-svc").
-		WithAnnotationsNew(map[string]string{
-			"openebs.io/capacity": cr.Spec.Capacity,
-		}).
 		WithStrategyType(appsv1.RollingUpdateStatefulSetStrategyType).
 		WithReplicas(&replicaCount).
 		WithSelectorMatchLabels(map[string]string{
-			"openebs.io/jiva-volume":             cr.Name,
-			"openebs.io/persistent-volume":       cr.Spec.PV,
-			"openebs.io/persistent-volume-claim": cr.Spec.PVC,
-			"openebs.io/replica":                 "jiva-replica",
+			"openebs.io/persistent-volume": cr.Spec.PV,
+			"openebs.io/component":         "jiva-replica",
 		}).
 		WithPodTemplateSpecBuilder(
 			pts.NewBuilder().
 				WithLabels(labels).
-				WithAnnotations(map[string]string{
-					"openebs.io/capacity": cr.Spec.Capacity,
-				}).
 				WithAffinity(&corev1.Affinity{
 					PodAntiAffinity: &corev1.PodAntiAffinity{
 						RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
 							{
 								LabelSelector: &metav1.LabelSelector{
 									MatchLabels: map[string]string{
-										"openebs.io/replica":                 "jiva-replica",
-										"openebs.io/persistent-volume":       cr.Spec.PV,
-										"openebs.io/persistent-volume-claim": cr.Spec.PVC,
-										"openebs.io/jiva-volume":             cr.Name,
+										"openebs.io/component":         "jiva-replica",
+										"openebs.io/persistent-volume": cr.Spec.PV,
 									},
 								},
 								TopologyKey: "kubernetes.io/hostname",
@@ -376,7 +360,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 							"--frontendIP",
 							fmt.Sprintf(svcNameFormat, cr.Spec.PV, cr.Namespace),
 							"--size",
-							cr.Spec.Capacity,
+							fmt.Sprintf("%v", cr.Spec.Capacity),
 							"openebs",
 						}).
 						WithImagePullPolicy(corev1.PullIfNotPresent).
@@ -393,9 +377,9 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 			pvc.NewBuilder().
 				WithName("openebs").
 				WithNamespace(cr.Namespace).
-				WithStorageClass(cr.Spec.SC).
+				WithStorageClass(cr.Spec.ReplicaSC).
 				WithAccessModes([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}).
-				WithCapacity(cr.Spec.Capacity),
+				WithCapacity(fmt.Sprintf("%v", cr.Spec.Capacity)),
 		).Build()
 
 	if err != nil {
@@ -448,12 +432,9 @@ func (r *ReconcileJivaVolume) updateJivaVolumeWithPhase(cr *jv.JivaVolume, phase
 func (r *ReconcileJivaVolume) createControllerService(cr *jv.JivaVolume,
 	reqLog logr.Logger) error {
 	labels := map[string]string{
-		"openebs.io/cas-type":                "jiva",
-		"openebs.io/controller":              "jiva-controller",
-		"openebs.io/controller-service":      "jiva-controller-service",
-		"openebs.io/jiva-volume":             cr.Name,
-		"openebs.io/persistent-volume":       cr.Spec.PV,
-		"openebs.io/persistent-volume-claim": cr.Spec.PVC,
+		"openebs.io/cas-type":          "jiva",
+		"openebs.io/component":         "jiva-controller-service",
+		"openebs.io/persistent-volume": cr.Spec.PV,
 	}
 
 	svcObj, err := svc.NewBuilder().
@@ -461,8 +442,7 @@ func (r *ReconcileJivaVolume) createControllerService(cr *jv.JivaVolume,
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithSelectorsNew(map[string]string{
-			"openebs.io/jiva-volume":       cr.Name,
-			"openebs.io/controller":        "jiva-controller",
+			"openebs.io/component":         "jiva-controller-service",
 			"openebs.io/persistent-volume": cr.Spec.PV,
 		}).
 		WithPorts([]corev1.ServicePort{
@@ -548,6 +528,7 @@ func (r *ReconcileJivaVolume) teardownJivaComponents(cr *jv.JivaVolume, reqLog l
 	return nil
 }
 
-func getAndUpdateVolumeStatus(addr string) error {
+func getAndUpdateVolumeStatus(cr *jv.JivaVolume) error {
+	//addr := cr.Spec.TargetIP + fmt.Sprintf(":%v", cr.Spec.TargetPort)
 	return nil
 }
