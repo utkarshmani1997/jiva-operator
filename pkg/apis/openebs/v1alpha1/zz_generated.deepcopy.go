@@ -74,6 +74,11 @@ func (in *JivaVolumeSpec) DeepCopyInto(out *JivaVolumeSpec) {
 	*out = *in
 	in.ReplicaResource.DeepCopyInto(&out.ReplicaResource)
 	in.TargetResource.DeepCopyInto(&out.TargetResource)
+	if in.TargetPortals != nil {
+		in, out := &in.TargetPortals, &out.TargetPortals
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	return
 }
 

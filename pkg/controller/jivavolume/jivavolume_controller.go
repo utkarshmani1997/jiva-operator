@@ -154,7 +154,7 @@ func (r *ReconcileJivaVolume) bootstrapJiva(cr *jv.JivaVolume, reqLog logr.Logge
 		return err
 	}
 
-	err = r.updateJivaVolumeWithServiceIP(cr, jv.JivaVolumePhasePending)
+	err = r.updateJivaVolumeWithServiceInfo(cr, jv.JivaVolumePhasePending)
 	if err != nil {
 		return err
 	}
@@ -404,7 +404,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 	return nil
 }
 
-func (r *ReconcileJivaVolume) updateJivaVolumeWithServiceIP(cr *jv.JivaVolume, phase jv.JivaVolumePhase) error {
+func (r *ReconcileJivaVolume) updateJivaVolumeWithServiceInfo(cr *jv.JivaVolume, phase jv.JivaVolumePhase) error {
 	ctrlSVC := &v1.Service{}
 	if err := r.client.Get(context.TODO(),
 		types.NamespacedName{
@@ -414,6 +414,19 @@ func (r *ReconcileJivaVolume) updateJivaVolumeWithServiceIP(cr *jv.JivaVolume, p
 		return operr.Wrapf(err, "failed to get service: {%v}", cr.Name+"-ctrl-svc")
 	}
 	cr.Spec.TargetIP = ctrlSVC.Spec.ClusterIP
+	var found bool
+	for _, port := range ctrlSVC.Spec.Ports {
+		if port.Name == "iscsi" {
+			found = true
+			cr.Spec.TargetPort = port.Port
+			cr.Spec.TargetPortals = []string{ctrlSVC.Spec.ClusterIP + fmt.Sprintf(":%v", port.Port)}
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("Can't find targetPort in target service spec: %v", ctrlSVC)
+	}
+
 	cr.Status.Phase = phase
 	if err := r.client.Update(context.TODO(), cr); err != nil {
 		return operr.Wrapf(err, "failed to update JivaVolume CR: {%v} with targetIP", cr)

@@ -54,26 +54,26 @@ print-variables:
 
 
 .get:
-	rm -rf ./build/_output/
+	rm -rf ./build/_output/bin/
 	GO111MODULE=on go mod download
 
 build-operator: .get
-	GO111MODULE=on GOOS=linux go build -a -ldflags '$(LDFLAGS)' -o ./build/_output/$(OPERATOR_NAME) ./cmd/manager/main.go
+	GO111MODULE=on GOOS=linux go build -a -ldflags '$(LDFLAGS)' -o ./build/_output/bin/$(OPERATOR_NAME) ./cmd/manager/main.go
 
 build-plugin: .get
-	GO111MODULE=on GOOS=linux go build -a -ldflags '$(LDFLAGS)' -o ./build/_output/$(PLUGIN_NAME) ./cmd/csi/main.go
+	GO111MODULE=on GOOS=linux go build -a -ldflags '$(LDFLAGS)' -o ./build/_output/bin/$(PLUGIN_NAME) ./cmd/csi/main.go
 
 container-plugin: build-plugin
 	docker build -f ./build/Dockerfile.plugin -t $(REGISTRY)/$(PLUGIN_NAME):$(PLUGIN_TAG) .
 
 container-operator: build-operator
-	docker build -f Dockerfile -t $(REGISTRY)/$(OPERATOR_NAME):$(OPERATOR_TAG) .
+	docker build -f ./build/Dockerfile -t $(REGISTRY)/$(OPERATOR_NAME):$(OPERATOR_TAG) .
 
 generate:
 	GO111MODULE=on operator-sdk generate k8s --verbose
 
 operator:
-	operator-sdk build $(REGISTRY)/$(OPERATOR_NAME):$(OPERATOR_TAG) --verbose
+	env GO111MODULE=on operator-sdk build $(REGISTRY)/$(OPERATOR_NAME):$(OPERATOR_TAG) --verbose
 
 push-csi: container-plugin
 	docker push $(REGISTRY)/$(PLUGIN_NAME):$(PLUGIN_TAG)

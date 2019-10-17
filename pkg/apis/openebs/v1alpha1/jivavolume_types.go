@@ -20,15 +20,16 @@ type JivaVolumeSpec struct {
 	TargetResource  v1.ResourceRequirements `json:"targetResource"`
 	// ReplicationFactor represents the actual replica count for the underlying
 	// jiva volume
-	ReplicationFactor string `json:"replicationFactor"`
-	TargetIP          string `json:"targetIP"`
-	TargetPort        int32  `json:"targetPort"`
-	Iqn               string `json:"iqn"`
-	TargetPortal      string `json:"targetPortal"`
-	MountPath         string `json:"mountPath"`
-	FSType            string `json:"fsType"`
-	ISCSIInterface    string `json:"iscsiInterface"`
-	DevicePath        string `json:"devicePath"`
+	ReplicationFactor string   `json:"replicationFactor"`
+	TargetIP          string   `json:"targetIP"`
+	TargetPort        int32    `json:"targetPort"`
+	Iqn               string   `json:"iqn"`
+	Lun               int32    `json:"lun"`
+	TargetPortals     []string `json:"targetPortal"`
+	MountPath         string   `json:"mountPath"`
+	FSType            string   `json:"fsType"`
+	ISCSIInterface    string   `json:"iscsiInterface"`
+	DevicePath        string   `json:"devicePath"`
 }
 
 // JivaVolumeStatus defines the observed state of JivaVolume

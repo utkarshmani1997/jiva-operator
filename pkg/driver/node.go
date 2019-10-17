@@ -19,17 +19,38 @@ package driver
 import (
 	"fmt"
 	"os"
-	"path"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-csi/csi-lib-iscsi/iscsi"
 	"github.com/sirupsen/logrus"
+	jv "github.com/utkarshmani1997/jiva-operator/pkg/apis/openebs/v1alpha1"
 	"github.com/utkarshmani1997/jiva-operator/pkg/kubernetes/client"
-	"github.com/utkarshmani1997/jiva-operator/pkg/volume"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func init() {
+	iscsi.EnableDebugLogging(&log2LogrusWriter{
+		entry: logrus.StandardLogger().WithContext(context.TODO()),
+	})
+}
+
+// log2LogrusWriter exploits the documented fact that the standard
+// log pkg sends each log entry as a single io.Writer.Write call:
+// https://golang.org/pkg/log/#Logger
+type log2LogrusWriter struct {
+	entry *logrus.Entry
+}
+
+func (w *log2LogrusWriter) Write(b []byte) (int, error) {
+	n := len(b)
+	if n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+	}
+	w.entry.Warning(string(b))
+	return n, nil
+}
 
 const (
 	// FSTypeExt2 represents the ext2 filesystem type
@@ -60,7 +81,7 @@ var (
 type node struct {
 	client  *client.Client
 	driver  *CSIDriver
-	mounter Mounter
+	mounter *NodeMounter
 }
 
 // NewNode returns a new instance
@@ -87,11 +108,6 @@ func (ns *node) NodePublishVolume(
 		return nil, status.Error(codes.InvalidArgument, "Volume ID not provided")
 	}
 
-	source := req.GetStagingTargetPath()
-	if len(source) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Staging target not provided")
-	}
-
 	target := req.GetTargetPath()
 	if len(target) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Target path not provided")
@@ -106,27 +122,58 @@ func (ns *node) NodePublishVolume(
 		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
 	}
 
+	if err := ns.client.Set(); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
 	instance, err := ns.client.GetJivaVolume(volumeID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	mountOptions := []string{}
-	if req.GetReadonly() {
-		mountOptions = append(mountOptions, "ro")
-	} else {
-		mountOptions = append(mountOptions, "rw")
+	if err := ns.formatAndMount(req, instance.Spec.DevicePath); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	err = ns.mounter.FormatAndMount(instance.Spec.DevicePath, instance.Spec.MountPath, instance.Spec.FSType, mountOptions)
-	if err != nil {
-		logrus.Errorf(
-			"iscsi: failed to mount iscsi volume %s [%s] to %s, error %v",
-			instance.Spec.DevicePath, instance.Spec.FSType, instance.Spec.MountPath, err,
-		)
+	instance.Spec.MountPath = target
+	if err := ns.client.UpdateJivaVolumeWithMountInfo(instance); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	return &csi.NodePublishVolumeResponse{}, nil
+}
+
+func (ns *node) formatAndMount(req *csi.NodePublishVolumeRequest, devicePath string) error {
+	// Mount device
+	mntPath := req.GetTargetPath()
+	notMnt, err := ns.mounter.IsLikelyNotMountPoint(mntPath)
+	if err != nil && !os.IsNotExist(err) {
+		if err := os.MkdirAll(mntPath, 0750); err != nil {
+			logrus.Errorf("iscsi: failed to mkdir %s, error", mntPath)
+			return err
+		}
+	}
+
+	if !notMnt {
+		logrus.Infof("Volume %s has been mounted already at %v", req.GetVolumeId(), mntPath)
+		return nil
+	}
+
+	targetPath := req.GetTargetPath()
+	fsType := req.GetVolumeCapability().GetMount().GetFsType()
+	options := []string{}
+	mountFlags := req.GetVolumeCapability().GetMount().GetMountFlags()
+	options = append(options, mountFlags...)
+
+	err = ns.mounter.FormatAndMount(devicePath, targetPath, fsType, options)
+	if err != nil {
+		logrus.Errorf(
+			"Failed to mount iscsi volume %s [%s, %s] to %s, error %v",
+			req.GetVolumeId(), devicePath, fsType, targetPath, err,
+		)
+		return err
+	}
+	return nil
 }
 
 // NodeUnpublishVolume unpublishes (unmounts) the volume
@@ -138,7 +185,33 @@ func (ns *node) NodeUnpublishVolume(
 	req *csi.NodeUnpublishVolumeRequest,
 ) (*csi.NodeUnpublishVolumeResponse, error) {
 
-	// TODO: unmount filesystem
+	logrus.Infof("NodeUnpublishVolume: called with args %+v", *req)
+	volumeID := req.GetVolumeId()
+	if len(volumeID) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume ID not provided")
+	}
+
+	target := req.GetTargetPath()
+	if len(target) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Target path not provided")
+	}
+
+	notMnt, err := ns.mounter.IsLikelyNotMountPoint(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, status.Error(codes.NotFound, "targetpath not found")
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if !notMnt {
+		return nil, status.Error(codes.Internal, "Volume not mounted")
+	}
+
+	logrus.Infof("NodeUnpublishVolume: unmounting %s", target)
+	if err := ns.mounter.Unmount(target); err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not unmount %q: %v", target, err)
+	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
@@ -198,11 +271,6 @@ func (ns *node) NodeStageVolume(
 		return nil, status.Error(codes.InvalidArgument, "Volume ID not provided")
 	}
 
-	target := req.GetStagingTargetPath()
-	if len(target) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Staging target not provided")
-	}
-
 	volCap := req.GetVolumeCapability()
 	if volCap == nil {
 		return nil, status.Error(codes.InvalidArgument, "Volume capability not provided")
@@ -222,61 +290,46 @@ func (ns *node) NodeStageVolume(
 		fsType = defaultFsType
 	}
 
+	if err := ns.client.Set(); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
 	instance, err := ns.client.GetJivaVolume(volumeID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	devicePath, err := ns.attachDisk(target, volumeID)
+	devicePath, err := ns.attachDisk(instance)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	if err := ns.client.UpdateJivaVolumeWithMountInfo(instance, volume.MountInfo{
-		Path:       mount.String(),
-		FSType:     fsType,
-		DevicePath: devicePath,
-	}); err != nil {
+	instance.Spec.FSType = fsType
+	instance.Spec.DevicePath = devicePath
+	if err := ns.client.UpdateJivaVolumeWithMountInfo(instance); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
-func (ns *node) attachDisk(mntPath, name string) (string, error) {
-	connector := iscsi.Connector{}
+func (ns *node) attachDisk(instance *jv.JivaVolume) (string, error) {
+	connector := iscsi.Connector{
+		VolumeName:    instance.Name,
+		TargetIqn:     instance.Spec.Iqn,
+		Port:          fmt.Sprint(instance.Spec.TargetPort),
+		Lun:           instance.Spec.Lun,
+		Interface:     instance.Spec.ISCSIInterface,
+		TargetPortals: instance.Spec.TargetPortals,
+	}
 	devicePath, err := iscsi.Connect(connector)
 	if err != nil {
 		return "", err
 	}
+
 	if devicePath == "" {
 		return "", fmt.Errorf("connect reported success, but no path returned")
 	}
-
-	// Mount device
-	notMnt, err := ns.mounter.IsLikelyNotMountPoint(mntPath)
-	if err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("Heuristic determination of mount point failed:%v", err)
-	}
-	if !notMnt {
-		logrus.Infof("iscsi: %s already mounted", mntPath)
-		return "", nil
-	}
-
-	if err := os.MkdirAll(mntPath, 0750); err != nil {
-		logrus.Errorf("iscsi: failed to mkdir %s, error", mntPath)
-		return "", err
-	}
-
-	// Persist iscsi disk config to json file for DetachDisk path
-	file := path.Join(mntPath, name+".json")
-	err = iscsi.PersistConnector(&connector, file)
-	if err != nil {
-		logrus.Errorf("failed to persist connection info: %v", err)
-		logrus.Errorf("disconnecting volume and failing the publish request because persistence files are required for reliable Unpublish")
-		return "", fmt.Errorf("unable to create persistence file for connection")
-	}
-
 	return devicePath, err
 }
 
@@ -288,6 +341,30 @@ func (ns *node) NodeUnstageVolume(
 	ctx context.Context,
 	req *csi.NodeUnstageVolumeRequest,
 ) (*csi.NodeUnstageVolumeResponse, error) {
+
+	volID := req.GetVolumeId()
+	if volID == "" {
+		return nil, status.Error(codes.InvalidArgument, "NodeUnstageVolume Volume ID must be provided")
+	}
+
+	if err := ns.client.Set(); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	instance, err := ns.client.GetJivaVolume(volID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if err := iscsi.Disconnect(instance.Spec.Iqn, instance.Spec.TargetPortals); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if err := os.RemoveAll(instance.Spec.MountPath); err != nil {
+		logrus.Errorf("Failed to remove mount path, err: %v", err)
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	logrus.Infof("detaching device %v is finished", instance.Spec.DevicePath)
 
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }

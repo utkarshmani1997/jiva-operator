@@ -19,12 +19,11 @@ package client
 import (
 	"context"
 
-	"github.com/sirupsen/logrus"
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/sirupsen/logrus"
 	"github.com/utkarshmani1997/jiva-operator/pkg/apis"
 	jv "github.com/utkarshmani1997/jiva-operator/pkg/apis/openebs/v1alpha1"
 	operr "github.com/utkarshmani1997/jiva-operator/pkg/errors/v1alpha1"
-	"github.com/utkarshmani1997/jiva-operator/pkg/volume"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -92,9 +91,7 @@ func (cl *Client) GetJivaVolume(name string) (*jv.JivaVolume, error) {
 	return instance, nil
 }
 
-func (cl *Client) UpdateJivaVolumeWithMountInfo(cr *jv.JivaVolume, minfo volume.MountInfo) error {
-	cr.Spec.MountPath = minfo.Path
-	cr.Spec.FSType = minfo.FSType
+func (cl *Client) UpdateJivaVolumeWithMountInfo(cr *jv.JivaVolume) error {
 	err := cl.client.Update(context.TODO(), cr)
 	if err != nil {
 		logrus.Errorf("Failed to update JivaVolume CR: %v", err)
@@ -145,7 +142,9 @@ func (cl *Client) CreateJivaVolume(req *csi.CreateVolumeRequest) error {
 				}
 			}(req),
 			ReplicationFactor: req.GetParameters()["replicaCount"],
-			Iqn:               "iqn.2016-09.com.openebs.jiva:" + name,
+			Iqn:               "iqn.2016-09.com.openebs.jiva" + ":" + name,
+			ISCSIInterface:    "default",
+			Lun:               0,
 		})
 
 	if jiva.errs != nil {
