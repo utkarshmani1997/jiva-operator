@@ -136,7 +136,7 @@ func (ns *node) NodePublishVolume(
 	}
 
 	instance.Spec.MountPath = target
-	if err := ns.client.UpdateJivaVolumeWithMountInfo(instance); err != nil {
+	if err := ns.client.UpdateJivaVolume(instance); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 

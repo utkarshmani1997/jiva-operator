@@ -3,6 +3,7 @@ kind: Role
 metadata:
   creationTimestamp: null
   name: jiva-operator
+  namespace: openebs
 rules:
 - apiGroups:
   - ""

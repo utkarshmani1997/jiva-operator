@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -70,7 +71,23 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 
 	// TODO(user): Modify this to be the types you create that are owned by the primary resource
 	// Watch for changes to secondary resource Pods and requeue the owner JivaVolume
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &handler.EnqueueRequestForOwner{
+	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &jv.JivaVolume{},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = c.Watch(&source.Kind{Type: &corev1.Service{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &jv.JivaVolume{},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}}, &handler.EnqueueRequestForOwner{
 		IsController: true,
 		OwnerType:    &jv.JivaVolume{},
 	})
@@ -122,7 +139,7 @@ func (r *ReconcileJivaVolume) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{}, getAndUpdateVolumeStatus(instance)
 	case jv.JivaVolumePhaseDeleting:
 		reqLogger.Info("start tearing down jiva components", "JivaVolume: ", instance)
-		return reconcile.Result{}, r.teardownJivaComponents(instance, reqLogger)
+		return reconcile.Result{}, nil //r.teardownJivaComponents(instance, reqLogger)
 	case jv.JivaVolumePhasePending, jv.JivaVolumePhaseFailed:
 		reqLogger.Info("start bootstraping jiva components", "JivaVolume: ", instance)
 		return reconcile.Result{}, r.bootstrapJiva(instance, reqLogger)
@@ -188,6 +205,7 @@ func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 		WithReplicas(&reps).
 		WithStrategyType(appsv1.RecreateDeploymentStrategyType).
 		WithSelectorMatchLabelsNew(map[string]string{
+			"openebs.io/cas-type":          "jiva",
 			"openebs.io/persistent-volume": cr.Spec.PV,
 		}).
 		WithPodTemplateSpecBuilder(
@@ -230,6 +248,7 @@ func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 								Value: cr.Spec.ReplicationFactor,
 							},
 						}).
+						WithResources(&cr.Spec.TargetResource).
 						WithImagePullPolicy(corev1.PullIfNotPresent),
 					container.NewBuilder().
 						WithImage(getImage("OPENEBS_IO_MAYA_EXPORTER_IMAGE",
@@ -258,6 +277,10 @@ func (r *ReconcileJivaVolume) createControllerDeployment(cr *jv.JivaVolume,
 		if err != nil {
 			return operr.Wrapf(err, "failed to create deployment: %v", dep.Name)
 		}
+		// Set JivaVolume instance as the owner and controller
+		if err := controllerutil.SetControllerReference(cr, dep, r.scheme); err != nil {
+			return operr.Wrapf(err, "failed to set JivaVolume: %v as owner for svc: %v", cr.Name, dep.Name)
+		}
 
 		// Statefulset created successfully - don't requeue
 		return nil
@@ -281,6 +304,7 @@ func getImage(key, component string) string {
 	return image
 }
 
+// TODO: Add code to configure resource limits, nodeAffinity etc.
 func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 	reqLog logr.Logger) error {
 
@@ -305,7 +329,7 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 	prev := true
 
 	stsObj, err = sts.NewBuilder().
-		WithName(cr.Spec.PV + "-jiva-rep").
+		WithName(cr.Name + "-jiva-rep").
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithServiceName("jiva-replica-svc").
@@ -358,13 +382,14 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 						WithArgumentsNew([]string{
 							"replica",
 							"--frontendIP",
-							fmt.Sprintf(svcNameFormat, cr.Spec.PV, cr.Namespace),
+							fmt.Sprintf(svcNameFormat, cr.Name, cr.Namespace),
 							"--size",
 							fmt.Sprintf("%v", cr.Spec.Capacity),
 							"openebs",
 						}).
 						WithImagePullPolicy(corev1.PullIfNotPresent).
 						WithPrivilegedSecurityContext(&prev).
+						WithResources(&cr.Spec.ReplicaResource).
 						WithVolumeMountsNew([]corev1.VolumeMount{
 							{
 								Name:      "openebs",
@@ -394,6 +419,10 @@ func (r *ReconcileJivaVolume) createReplicaStatefulSet(cr *jv.JivaVolume,
 		if err != nil {
 			return operr.Wrapf(err, "failed to create statefulset: %v", stsObj.Name)
 		}
+		// Set JivaVolume instance as the owner and controller
+		if err := controllerutil.SetControllerReference(cr, stsObj, r.scheme); err != nil {
+			return operr.Wrapf(err, "failed to set JivaVolume: %v as owner for svc: %v", cr.Name, stsObj.Name)
+		}
 
 		// Statefulset created successfully - don't requeue
 		return nil
@@ -408,7 +437,7 @@ func (r *ReconcileJivaVolume) updateJivaVolumeWithServiceInfo(cr *jv.JivaVolume,
 	ctrlSVC := &v1.Service{}
 	if err := r.client.Get(context.TODO(),
 		types.NamespacedName{
-			Name:      cr.Spec.PV + "-jiva-ctrl-svc",
+			Name:      cr.Name + "-jiva-ctrl-svc",
 			Namespace: cr.Namespace,
 		}, ctrlSVC); err != nil {
 		return operr.Wrapf(err, "failed to get service: {%v}", cr.Name+"-ctrl-svc")
@@ -451,11 +480,11 @@ func (r *ReconcileJivaVolume) createControllerService(cr *jv.JivaVolume,
 	}
 
 	svcObj, err := svc.NewBuilder().
-		WithName(cr.Spec.PV + "-jiva-ctrl-svc").
+		WithName(cr.Name + "-jiva-ctrl-svc").
 		WithLabelsNew(labels).
 		WithNamespace(cr.Namespace).
 		WithSelectorsNew(map[string]string{
-			"openebs.io/component":         "jiva-controller-service",
+			"openebs.io/cas-type":          "jiva",
 			"openebs.io/persistent-volume": cr.Spec.PV,
 		}).
 		WithPorts([]corev1.ServicePort{
@@ -492,6 +521,11 @@ func (r *ReconcileJivaVolume) createControllerService(cr *jv.JivaVolume,
 		if err != nil {
 			return operr.Wrapf(err, "failed to create svc: %v", svcObj.Name)
 		}
+		// Set JivaVolume instance as the owner and controller
+		if err := controllerutil.SetControllerReference(cr, svcObj, r.scheme); err != nil {
+			return operr.Wrapf(err, "failed to set JivaVolume: %v as owner for svc: %v", cr.Name, svcObj.Name)
+		}
+
 		return nil
 	} else if err != nil {
 		return operr.Wrapf(err, "failed to get the service details: %v", svcObj.Name)
@@ -520,6 +554,7 @@ func (r *ReconcileJivaVolume) deleteJivaVolume(cr *jv.JivaVolume) error {
 	return deleteResource(cr.Name, cr.Namespace, r, &jv.JivaVolume{})
 }
 
+// TODO: remove this once owner references are set.
 func (r *ReconcileJivaVolume) teardownJivaComponents(cr *jv.JivaVolume, reqLog logr.Logger) (err error) {
 	objects := map[string]runtime.Object{
 		cr.Spec.PV + "-jiva-ctrl-svc": &v1.Service{},

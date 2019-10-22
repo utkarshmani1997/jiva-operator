@@ -21,6 +21,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/sirupsen/logrus"
+	ic "github.com/utkarshmani1997/iscsi-operator/pkg/apis/openebs/v1alpha1"
 	"github.com/utkarshmani1997/jiva-operator/pkg/apis"
 	jv "github.com/utkarshmani1997/jiva-operator/pkg/apis/openebs/v1alpha1"
 	operr "github.com/utkarshmani1997/jiva-operator/pkg/errors/v1alpha1"
@@ -91,7 +92,63 @@ func (cl *Client) GetJivaVolume(name string) (*jv.JivaVolume, error) {
 	return instance, nil
 }
 
-func (cl *Client) UpdateJivaVolumeWithMountInfo(cr *jv.JivaVolume) error {
+func (cl *Client) GetISCSIConnection(name string) (*jv.JivaVolume, error) {
+	ns := "openebs"
+	instance := &ic.ISCSIConnection{}
+	err := cl.client.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: ns}, instance)
+	if err != nil {
+		logrus.Errorf("Failed to get ISCSIConnection CR: %v", err)
+		if errors.IsNotFound(err) {
+			return instance, err
+		}
+		return instance, err
+	}
+	return instance, nil
+}
+
+func (cl *Client) CreateISCSIConnection(nodeName string, instance jv.JivaVolume) (*ic.ISCSIConnection, error) {
+	name := instance.Name
+	ns := instance.Namespace
+	iscsi := new(ISCSI).withKindAndAPIVersion("ISCSIConnection", "openebs.io/v1alpha1").
+		withNameAndNamespace(instance.Name, instance.Namespace).
+		withPhase(ic.ISCSIConnectionPhasePending).
+		withSpec(ic.ISCSIConnectionSpec{
+			VolumeName:    instance.Name,
+			TargetIqn:     instance.Spec.TargetIqn,
+			TargetPortals: instance.Spec.TargetPortals,
+			Port:          instance.Spec.TargetPort,
+			Lun:           instance.Spec.Lun,
+			Interface:     instance.Spec.ISCSIInterface,
+			NodeName:      nodeName,
+		})
+	if iscsi.errs != nil {
+		return operr.Errorf("failed to create ISCSIConnection CR, err: %v", iscsi.errs)
+	}
+
+	obj := iscsi.instance()
+	err := cl.client.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: ns}, obj)
+	if err != nil && errors.IsNotFound(err) {
+		logrus.Infof("Creating a new ISCSIConnection CR, name: %v, namespace: %v", name, ns)
+		err = cl.client.Create(context.TODO(), obj)
+		if err != nil {
+			return operr.Wrapf(err, "failed to create ISCSIConnection CR, name: %v, namespace: %v", name, ns)
+		}
+		return nil
+	} else if err != nil {
+		return operr.Wrapf(err, "failed to get the ISCSIConnection details: %v", obj.Name)
+	}
+	return nil, nil
+}
+
+func (cl *Client) UpdateISCSIConnection(instance *ic.ISCSIConnection) error {
+	return nil
+}
+
+func (cl *Client) DeleteISCSIConnection(instance *ic.ISCSIConnection) error {
+	return nil
+}
+
+func (cl *Client) UpdateJivaVolume(cr *jv.JivaVolume) error {
 	err := cl.client.Update(context.TODO(), cr)
 	if err != nil {
 		logrus.Errorf("Failed to update JivaVolume CR: %v", err)

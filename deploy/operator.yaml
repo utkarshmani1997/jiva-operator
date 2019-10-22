@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: jiva-operator
+  namespace: openebs
 spec:
   replicas: 1
   selector:
@@ -16,7 +17,7 @@ spec:
       containers:
         - name: jiva-operator
           # Replace this with the built image name
-          image: utkarshmani1997/jiva-operator:ci
+          image: utkarshmani1997/jiva-operator:dev
           command:
           - jiva-operator
           imagePullPolicy: Always

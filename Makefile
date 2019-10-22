@@ -57,7 +57,10 @@ print-variables:
 	rm -rf ./build/_output/bin/
 	GO111MODULE=on go mod download
 
-build-operator: .get
+deps: .get
+	GO111MODULE=on go mod vendor
+
+build-operator: deps
 	GO111MODULE=on GOOS=linux go build -a -ldflags '$(LDFLAGS)' -o ./build/_output/bin/$(OPERATOR_NAME) ./cmd/manager/main.go
 
 build-plugin: .get

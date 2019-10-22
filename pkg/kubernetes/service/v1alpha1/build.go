@@ -240,6 +240,11 @@ func (b *Builder) WithPorts(ports []corev1.ServicePort) *Builder {
 	return b
 }
 
+func (b *Builder) WithClusterIP(ip string) *Builder {
+	b.service.object.Spec.ClusterIP = ip
+	return b
+}
+
 // Build returns the Service API instance
 func (b *Builder) Build() (*corev1.Service, error) {
 	if len(b.errs) > 0 {
